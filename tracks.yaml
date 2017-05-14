@@ -87,7 +87,7 @@ tracks:
     release_inc: '1'
     release_repo_url: null
     release_tag: v:{version}
-    ros_distro: jade
+    ros_distro: kinetic
     vcs_type: git
     vcs_uri: https://github.com/ktossell/libuvc.git
     version: :{ask}
