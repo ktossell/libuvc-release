@@ -33,6 +33,7 @@
 *********************************************************************/
 /**
  * @defgroup device Device handling and enumeration
+ * @brief Support for finding, inspecting and opening UVC devices
  */
 
 #include "libuvc/libuvc.h"
@@ -48,6 +49,9 @@ uvc_error_t uvc_scan_control(uvc_device_t *dev, uvc_device_info_t *info);
 uvc_error_t uvc_parse_vc(uvc_device_t *dev,
 			 uvc_device_info_t *info,
 			 const unsigned char *block, size_t block_size);
+uvc_error_t uvc_parse_vc_selector_unit(uvc_device_t *dev,
+					uvc_device_info_t *info,
+					const unsigned char *block, size_t block_size);
 uvc_error_t uvc_parse_vc_extension_unit(uvc_device_t *dev,
 					uvc_device_info_t *info,
 					const unsigned char *block,
@@ -80,11 +84,17 @@ uvc_error_t uvc_parse_vs_format_mjpeg(uvc_streaming_interface_t *stream_if,
 uvc_error_t uvc_parse_vs_frame_uncompressed(uvc_streaming_interface_t *stream_if,
 					    const unsigned char *block,
 					    size_t block_size);
+uvc_error_t uvc_parse_vs_frame_format(uvc_streaming_interface_t *stream_if,
+					    const unsigned char *block,
+					    size_t block_size);
+uvc_error_t uvc_parse_vs_frame_frame(uvc_streaming_interface_t *stream_if,
+					    const unsigned char *block,
+					    size_t block_size);
 uvc_error_t uvc_parse_vs_input_header(uvc_streaming_interface_t *stream_if,
 				      const unsigned char *block,
 				      size_t block_size);
 
-void _uvc_status_callback(struct libusb_transfer *transfer);
+void LIBUSB_CALL _uvc_status_callback(struct libusb_transfer *transfer);
 
 /** @internal
  * @brief Test whether the specified USB device has been opened as a UVC device
@@ -158,6 +168,79 @@ uvc_error_t uvc_find_device(
 
   if (found_dev) {
     *dev = test_dev;
+    UVC_EXIT(UVC_SUCCESS);
+    return UVC_SUCCESS;
+  } else {
+    UVC_EXIT(UVC_ERROR_NO_DEVICE);
+    return UVC_ERROR_NO_DEVICE;
+  }
+}
+
+/** @brief Finds all cameras identified by vendor, product and/or serial number
+ * @ingroup device
+ *
+ * @param[in] ctx UVC context in which to search for the camera
+ * @param[out] devs List of matching cameras
+ * @param[in] vid Vendor ID number, optional
+ * @param[in] pid Product ID number, optional
+ * @param[in] sn Serial number or NULL
+ * @return Error finding device or UVC_SUCCESS
+ */
+uvc_error_t uvc_find_devices(
+    uvc_context_t *ctx, uvc_device_t ***devs,
+    int vid, int pid, const char *sn) {
+  uvc_error_t ret = UVC_SUCCESS;
+
+  uvc_device_t **list;
+  uvc_device_t *test_dev;
+  int dev_idx;
+  int found_dev;
+
+  uvc_device_t **list_internal;
+  int num_uvc_devices;
+
+  UVC_ENTER();
+
+  ret = uvc_get_device_list(ctx, &list);
+
+  if (ret != UVC_SUCCESS) {
+    UVC_EXIT(ret);
+    return ret;
+  }
+
+  num_uvc_devices = 0;
+  dev_idx = 0;
+  found_dev = 0;
+
+  list_internal = malloc(sizeof(*list_internal));
+  *list_internal = NULL;
+
+  while ((test_dev = list[dev_idx++]) != NULL) {
+    uvc_device_descriptor_t *desc;
+
+    if (uvc_get_device_descriptor(test_dev, &desc) != UVC_SUCCESS)
+      continue;
+
+    if ((!vid || desc->idVendor == vid)
+        && (!pid || desc->idProduct == pid)
+        && (!sn || (desc->serialNumber && !strcmp(desc->serialNumber, sn)))) {
+      found_dev = 1;
+      uvc_ref_device(test_dev);
+
+      num_uvc_devices++;
+      list_internal = realloc(list_internal, (num_uvc_devices + 1) * sizeof(*list_internal));
+
+      list_internal[num_uvc_devices - 1] = test_dev;
+      list_internal[num_uvc_devices] = NULL;
+    }
+
+    uvc_free_device_descriptor(desc);
+  }
+
+  uvc_free_device_list(list, 1);
+
+  if (found_dev) {
+    *devs = list_internal;
     UVC_EXIT(UVC_SUCCESS);
     return UVC_SUCCESS;
   } else {
@@ -262,7 +345,9 @@ uvc_error_t uvc_open(
   return ret;
 
  fail:
-  uvc_release_if(internal_devh, internal_devh->info->ctrl_if.bInterfaceNumber);
+  if ( internal_devh->info ) {
+    uvc_release_if(internal_devh, internal_devh->info->ctrl_if.bInterfaceNumber);
+  }
   libusb_close(usb_devh);
   uvc_unref_device(dev);
   uvc_free_devh(internal_devh);
@@ -407,19 +492,29 @@ uvc_error_t uvc_get_device_descriptor(
   desc_internal->idProduct = usb_desc.idProduct;
 
   if (libusb_open(dev->usb_dev, &usb_devh) == 0) {
-    unsigned char serial_buf[64];
+    unsigned char buf[64];
 
-    int serial_bytes = libusb_get_string_descriptor_ascii(
-        usb_devh, usb_desc.iSerialNumber, serial_buf, sizeof(serial_buf));
+    int bytes = libusb_get_string_descriptor_ascii(
+        usb_devh, usb_desc.iSerialNumber, buf, sizeof(buf));
 
-    if (serial_bytes > 0)
-      desc_internal->serialNumber = strdup((const char*) serial_buf);
+    if (bytes > 0)
+      desc_internal->serialNumber = strdup((const char*) buf);
 
-    /** @todo get manufacturer, product names */
+    bytes = libusb_get_string_descriptor_ascii(
+        usb_devh, usb_desc.iManufacturer, buf, sizeof(buf));
+
+    if (bytes > 0)
+      desc_internal->manufacturer = strdup((const char*) buf);
+
+    bytes = libusb_get_string_descriptor_ascii(
+        usb_devh, usb_desc.iProduct, buf, sizeof(buf));
+
+    if (bytes > 0)
+      desc_internal->product = strdup((const char*) buf);
 
     libusb_close(usb_devh);
   } else {
-    UVC_DEBUG("can't open device %04x:%04x, not fetching serial",
+    UVC_DEBUG("can't open device %04x:%04x, not fetching serial etc.",
 	      usb_desc.idVendor, usb_desc.idProduct);
   }
 
@@ -466,7 +561,6 @@ void uvc_free_device_descriptor(
 uvc_error_t uvc_get_device_list(
     uvc_context_t *ctx,
     uvc_device_t ***list) {
-  uvc_error_t ret;
   struct libusb_device **usb_dev_list;
   struct libusb_device *usb_dev;
   int num_usb_devices;
@@ -476,8 +570,8 @@ uvc_error_t uvc_get_device_list(
 
   /* per device */
   int dev_idx;
-  struct libusb_device_handle *usb_devh;
   struct libusb_config_descriptor *config;
+  struct libusb_device_descriptor desc;
   uint8_t got_interface;
 
   /* per interface */
@@ -504,10 +598,12 @@ uvc_error_t uvc_get_device_list(
   dev_idx = -1;
 
   while ((usb_dev = usb_dev_list[++dev_idx]) != NULL) {
-    usb_devh = NULL;
     got_interface = 0;
 
     if (libusb_get_config_descriptor(usb_dev, 0, &config) != 0)
+      continue;
+
+    if ( libusb_get_device_descriptor ( usb_dev, &desc ) != LIBUSB_SUCCESS )
       continue;
 
     for (interface_idx = 0;
@@ -519,6 +615,23 @@ uvc_error_t uvc_get_device_list(
 	   !got_interface && altsetting_idx < interface->num_altsetting;
 	   ++altsetting_idx) {
 	if_desc = &interface->altsetting[altsetting_idx];
+
+        // Skip TIS cameras that definitely aren't UVC even though they might
+        // look that way
+
+        if ( 0x199e == desc.idVendor && desc.idProduct  >= 0x8201 &&
+            desc.idProduct <= 0x8208 ) {
+          continue;
+        }
+
+        // Special case for Imaging Source cameras
+	/* Video, Streaming */
+        if ( 0x199e == desc.idVendor && ( 0x8101 == desc.idProduct ||
+            0x8102 == desc.idProduct ) &&
+            if_desc->bInterfaceClass == 255 &&
+            if_desc->bInterfaceSubClass == 2 ) {
+	  got_interface = 1;
+	}
 
 	/* Video, Streaming */
 	if (if_desc->bInterfaceClass == 14 && if_desc->bInterfaceSubClass == 2) {
@@ -611,6 +724,29 @@ libusb_device_handle *uvc_get_libusb_handle(uvc_device_handle_t *devh) {
 }
 
 /**
+ * @brief Get camera terminal descriptor for the open device.
+ *
+ * @note Do not modify the returned structure.
+ * @note The returned structure is part of a linked list, but iterating through
+ * it will make it no longer the camera terminal
+ *
+ * @param devh Device handle to an open UVC device
+ */
+const uvc_input_terminal_t *uvc_get_camera_terminal(uvc_device_handle_t *devh) {
+  const uvc_input_terminal_t *term = uvc_get_input_terminals(devh);
+  while(term != NULL) {
+    if (term->wTerminalType == UVC_ITT_CAMERA) {
+      break;
+    }
+    else {
+      term = term->next;
+    }
+  }
+  return term;
+}
+
+
+/**
  * @brief Get input terminal descriptors for the open device.
  *
  * @note Do not modify the returned structure.
@@ -634,6 +770,19 @@ const uvc_input_terminal_t *uvc_get_input_terminals(uvc_device_handle_t *devh) {
  */
 const uvc_output_terminal_t *uvc_get_output_terminals(uvc_device_handle_t *devh) {
   return NULL; /* @todo */
+}
+
+/**
+ * @brief Get selector unit descriptors for the open device.
+ *
+ * @note Do not modify the returned structure.
+ * @note The returned structure is part of a linked list. Iterate through
+ *       it by using the 'next' pointers.
+ *
+ * @param devh Device handle to an open UVC device
+ */
+const uvc_selector_unit_t *uvc_get_selector_units(uvc_device_handle_t *devh) {
+  return devh->info->ctrl_if.selector_unit_descs;
 }
 
 /**
@@ -704,9 +853,15 @@ void uvc_unref_device(uvc_device_t *dev) {
  * @param idx UVC interface index
  */
 uvc_error_t uvc_claim_if(uvc_device_handle_t *devh, int idx) {
-  int ret;
+  int ret = UVC_SUCCESS;
 
   UVC_ENTER();
+
+  if ( devh->claimed & ( 1 << idx )) {
+    fprintf ( stderr, "attempt to claim already-claimed interface %d\n", idx );
+    UVC_EXIT(ret);
+    return ret;
+  }
 
   /* Tell libusb to detach any active kernel drivers. libusb will keep track of whether
    * it found a kernel driver for this interface. */
@@ -714,7 +869,9 @@ uvc_error_t uvc_claim_if(uvc_device_handle_t *devh, int idx) {
 
   if (ret == UVC_SUCCESS || ret == LIBUSB_ERROR_NOT_FOUND || ret == LIBUSB_ERROR_NOT_SUPPORTED) {
     UVC_DEBUG("claiming interface %d", idx);
-    ret = libusb_claim_interface(devh->usb_devh, idx);
+    if (!( ret = libusb_claim_interface(devh->usb_devh, idx))) {
+      devh->claimed |= ( 1 << idx );
+    }
   } else {
     UVC_DEBUG("not claiming interface %d: unable to detach kernel driver (%s)",
               idx, uvc_strerror(ret));
@@ -732,10 +889,16 @@ uvc_error_t uvc_claim_if(uvc_device_handle_t *devh, int idx) {
  * @param idx UVC interface index
  */
 uvc_error_t uvc_release_if(uvc_device_handle_t *devh, int idx) {
-  int ret;
+  int ret = UVC_SUCCESS;
 
   UVC_ENTER();
   UVC_DEBUG("releasing interface %d", idx);
+  if (!( devh->claimed & ( 1 << idx ))) {
+    fprintf ( stderr, "attempt to release unclaimed interface %d\n", idx );
+    UVC_EXIT(ret);
+    return ret;
+  }
+
   /* libusb_release_interface *should* reset the alternate setting to the first available,
      but sometimes (e.g. on Darwin) it doesn't. Thus, we do it explicitly here.
      This is needed to de-initialize certain cameras. */
@@ -743,6 +906,7 @@ uvc_error_t uvc_release_if(uvc_device_handle_t *devh, int idx) {
   ret = libusb_release_interface(devh->usb_devh, idx);
 
   if (UVC_SUCCESS == ret) {
+    devh->claimed &= ~( 1 << idx );
     /* Reattach any kernel drivers that were disabled when we claimed this interface */
     ret = libusb_attach_kernel_driver(devh->usb_devh, idx);
 
@@ -776,8 +940,20 @@ uvc_error_t uvc_scan_control(uvc_device_t *dev, uvc_device_info_t *info) {
   ret = UVC_SUCCESS;
   if_desc = NULL;
 
+  uvc_device_descriptor_t* dev_desc;
+  int haveTISCamera = 0;
+  uvc_get_device_descriptor ( dev, &dev_desc );
+  if ( 0x199e == dev_desc->idVendor && ( 0x8101 == dev_desc->idProduct ||
+      0x8102 == dev_desc->idProduct )) {
+    haveTISCamera = 1;
+  }
+  uvc_free_device_descriptor ( dev_desc );
+
   for (interface_idx = 0; interface_idx < info->config->bNumInterfaces; ++interface_idx) {
     if_desc = &info->config->interface[interface_idx].altsetting[0];
+
+    if ( haveTISCamera && if_desc->bInterfaceClass == 255 && if_desc->bInterfaceSubClass == 1) // Video, Control
+      break;
 
     if (if_desc->bInterfaceClass == 14 && if_desc->bInterfaceSubClass == 1) // Video, Control
       break;
@@ -837,7 +1013,9 @@ uvc_error_t uvc_parse_vc_header(uvc_device_t *dev,
 
   switch (info->ctrl_if.bcdUVC) {
   case 0x0100:
+    info->ctrl_if.dwClockFrequency = DW_TO_INT(block + 7);
   case 0x010a:
+    info->ctrl_if.dwClockFrequency = DW_TO_INT(block + 7);
   case 0x0110:
     break;
   default:
@@ -907,11 +1085,31 @@ uvc_error_t uvc_parse_vc_processing_unit(uvc_device_t *dev,
   unit = calloc(1, sizeof(*unit));
   unit->bUnitID = block[3];
   unit->bSourceID = block[4];
-  
+
   for (i = 7 + block[7]; i >= 8; --i)
     unit->bmControls = block[i] + (unit->bmControls << 8);
-  
+
   DL_APPEND(info->ctrl_if.processing_unit_descs, unit);
+
+  UVC_EXIT(UVC_SUCCESS);
+  return UVC_SUCCESS;
+}
+
+/** @internal
+ * @brief Parse a VideoControl selector unit.
+ * @ingroup device
+ */
+uvc_error_t uvc_parse_vc_selector_unit(uvc_device_t *dev,
+					 uvc_device_info_t *info,
+					 const unsigned char *block, size_t block_size) {
+  uvc_selector_unit_t *unit;
+
+  UVC_ENTER();
+
+  unit = calloc(1, sizeof(*unit));
+  unit->bUnitID = block[3];
+
+  DL_APPEND(info->ctrl_if.selector_unit_descs, unit);
 
   UVC_EXIT(UVC_SUCCESS);
   return UVC_SUCCESS;
@@ -933,14 +1131,14 @@ uvc_error_t uvc_parse_vc_extension_unit(uvc_device_t *dev,
 
   unit->bUnitID = block[3];
   memcpy(unit->guidExtensionCode, &block[4], 16);
-  
+
   num_in_pins = block[21];
   size_of_controls = block[22 + num_in_pins];
   start_of_controls = &block[23 + num_in_pins];
-  
+
   for (i = size_of_controls - 1; i >= 0; --i)
     unit->bmControls = start_of_controls[i] + (unit->bmControls << 8);
-  
+
   DL_APPEND(info->ctrl_if.extension_unit_descs, unit);
 
   UVC_EXIT(UVC_SUCCESS);
@@ -977,6 +1175,7 @@ uvc_error_t uvc_parse_vc(
   case UVC_VC_OUTPUT_TERMINAL:
     break;
   case UVC_VC_SELECTOR_UNIT:
+    ret = uvc_parse_vc_selector_unit(dev, info, block, block_size);
     break;
   case UVC_VC_PROCESSING_UNIT:
     ret = uvc_parse_vc_processing_unit(dev, info, block, block_size);
@@ -1082,6 +1281,36 @@ uvc_error_t uvc_parse_vs_format_uncompressed(uvc_streaming_interface_t *stream_i
 }
 
 /** @internal
+ * @brief Parse a VideoStreaming frame format block.
+ * @ingroup device
+ */
+uvc_error_t uvc_parse_vs_frame_format(uvc_streaming_interface_t *stream_if,
+					     const unsigned char *block,
+					     size_t block_size) {
+  UVC_ENTER();
+
+  uvc_format_desc_t *format = calloc(1, sizeof(*format));
+
+  format->parent = stream_if;
+  format->bDescriptorSubtype = block[2];
+  format->bFormatIndex = block[3];
+  format->bNumFrameDescriptors = block[4];
+  memcpy(format->guidFormat, &block[5], 16);
+  format->bBitsPerPixel = block[21];
+  format->bDefaultFrameIndex = block[22];
+  format->bAspectRatioX = block[23];
+  format->bAspectRatioY = block[24];
+  format->bmInterlaceFlags = block[25];
+  format->bCopyProtect = block[26];
+  format->bVariableSize = block[27];
+
+  DL_APPEND(stream_if->format_descs, format);
+
+  UVC_EXIT(UVC_SUCCESS);
+  return UVC_SUCCESS;
+}
+
+/** @internal
  * @brief Parse a VideoStreaming MJPEG format block.
  * @ingroup device
  */
@@ -1105,6 +1334,58 @@ uvc_error_t uvc_parse_vs_format_mjpeg(uvc_streaming_interface_t *stream_if,
   format->bCopyProtect = block[10];
 
   DL_APPEND(stream_if->format_descs, format);
+
+  UVC_EXIT(UVC_SUCCESS);
+  return UVC_SUCCESS;
+}
+
+/** @internal
+ * @brief Parse a VideoStreaming uncompressed frame block.
+ * @ingroup device
+ */
+uvc_error_t uvc_parse_vs_frame_frame(uvc_streaming_interface_t *stream_if,
+					    const unsigned char *block,
+					    size_t block_size) {
+  uvc_format_desc_t *format;
+  uvc_frame_desc_t *frame;
+
+  const unsigned char *p;
+  int i;
+
+  UVC_ENTER();
+
+  format = stream_if->format_descs->prev;
+  frame = calloc(1, sizeof(*frame));
+
+  frame->parent = format;
+
+  frame->bDescriptorSubtype = block[2];
+  frame->bFrameIndex = block[3];
+  frame->bmCapabilities = block[4];
+  frame->wWidth = block[5] + (block[6] << 8);
+  frame->wHeight = block[7] + (block[8] << 8);
+  frame->dwMinBitRate = DW_TO_INT(&block[9]);
+  frame->dwMaxBitRate = DW_TO_INT(&block[13]);
+  frame->dwDefaultFrameInterval = DW_TO_INT(&block[17]);
+  frame->bFrameIntervalType = block[21];
+  frame->dwBytesPerLine = DW_TO_INT(&block[22]);
+
+  if (block[21] == 0) {
+    frame->dwMinFrameInterval = DW_TO_INT(&block[26]);
+    frame->dwMaxFrameInterval = DW_TO_INT(&block[30]);
+    frame->dwFrameIntervalStep = DW_TO_INT(&block[34]);
+  } else {
+    frame->intervals = calloc(block[21] + 1, sizeof(frame->intervals[0]));
+    p = &block[26];
+
+    for (i = 0; i < block[21]; ++i) {
+      frame->intervals[i] = DW_TO_INT(p);
+      p += 4;
+    }
+    frame->intervals[block[21]] = 0;
+  }
+
+  DL_APPEND(format->frame_descs, frame);
 
   UVC_EXIT(UVC_SUCCESS);
   return UVC_SUCCESS;
@@ -1139,7 +1420,7 @@ uvc_error_t uvc_parse_vs_frame_uncompressed(uvc_streaming_interface_t *stream_if
   frame->dwMaxBitRate = DW_TO_INT(&block[13]);
   frame->dwMaxVideoFrameBufferSize = DW_TO_INT(&block[17]);
   frame->dwDefaultFrameInterval = DW_TO_INT(&block[21]);
-  // frame->bFrameIntervalType = block[25];
+  frame->bFrameIntervalType = block[25];
 
   if (block[25] == 0) {
     frame->dwMinFrameInterval = DW_TO_INT(&block[26]);
@@ -1183,6 +1464,12 @@ uvc_error_t uvc_parse_vs(
   case UVC_VS_INPUT_HEADER:
     ret = uvc_parse_vs_input_header(stream_if, block, block_size);
     break;
+  case UVC_VS_OUTPUT_HEADER:
+    fprintf ( stderr, "unsupported descriptor subtype VS_OUTPUT_HEADER\n" );
+    break;
+  case UVC_VS_STILL_IMAGE_FRAME:
+    fprintf ( stderr, "unsupported descriptor subtype VS_STILL_IMAGE_FRAME\n" );
+    break;
   case UVC_VS_FORMAT_UNCOMPRESSED:
     ret = uvc_parse_vs_format_uncompressed(stream_if, block, block_size);
     break;
@@ -1193,8 +1480,27 @@ uvc_error_t uvc_parse_vs(
   case UVC_VS_FRAME_MJPEG:
     ret = uvc_parse_vs_frame_uncompressed(stream_if, block, block_size);
     break;
+  case UVC_VS_FORMAT_MPEG2TS:
+    fprintf ( stderr, "unsupported descriptor subtype VS_FORMAT_MPEG2TS\n" );
+    break;
+  case UVC_VS_FORMAT_DV:
+    fprintf ( stderr, "unsupported descriptor subtype VS_FORMAT_DV\n" );
+    break;
+  case UVC_VS_COLORFORMAT:
+    fprintf ( stderr, "unsupported descriptor subtype VS_COLORFORMAT\n" );
+    break;
+  case UVC_VS_FORMAT_FRAME_BASED:
+    ret = uvc_parse_vs_frame_format ( stream_if, block, block_size );
+    break;
+  case UVC_VS_FRAME_FRAME_BASED:
+    ret = uvc_parse_vs_frame_frame ( stream_if, block, block_size );
+    break;
+  case UVC_VS_FORMAT_STREAM_BASED:
+    fprintf ( stderr, "unsupported descriptor subtype VS_FORMAT_STREAM_BASED\n" );
+    break;
   default:
     /** @todo handle JPEG and maybe still frames or even DV... */
+    //fprintf ( stderr, "unsupported descriptor subtype: %d\n",descriptor_subtype );
     break;
   }
 
@@ -1276,93 +1582,73 @@ size_t uvc_num_devices(uvc_context_t *ctx) {
   return count;
 }
 
-void uvc_process_status_xfer(uvc_device_handle_t *devh, struct libusb_transfer *transfer) {
+void uvc_process_control_status(uvc_device_handle_t *devh, unsigned char *data, int len) {
   enum uvc_status_class status_class;
   uint8_t originator = 0, selector = 0, event = 0;
   enum uvc_status_attribute attribute = UVC_STATUS_ATTRIBUTE_UNKNOWN;
-  void *data = NULL;
-  size_t data_len = 0;
+  void *content = NULL;
+  size_t content_len = 0;
+  int found_entity = 0;
+  struct uvc_input_terminal *input_terminal;
+  struct uvc_processing_unit *processing_unit;
 
   UVC_ENTER();
 
-  /* printf("Got transfer of aLen = %d\n", transfer->actual_length); */
-
-  if (transfer->actual_length < 4) {
-    UVC_DEBUG("Short read of status update (%d bytes)", transfer->actual_length);
+  if (len < 5) {
+    UVC_DEBUG("Short read of VideoControl status update (%d bytes)", len);
     UVC_EXIT_VOID();
     return;
   }
 
-  originator = transfer->buffer[1];
+  originator = data[1];
+  event = data[2];
+  selector = data[3];
 
-  switch (transfer->buffer[0] & 0x0f) {
-  case 1: {  /* VideoControl interface */
-    int found_entity = 0;
-    struct uvc_input_terminal *input_terminal;
-    struct uvc_processing_unit *processing_unit;
+  if (originator == 0) {
+    UVC_DEBUG("Unhandled update from VC interface");
+    UVC_EXIT_VOID();
+    return;  /* @todo VideoControl virtual entity interface updates */
+  }
 
-    if (transfer->actual_length < 5) {
-      UVC_DEBUG("Short read of VideoControl status update (%d bytes)",
-		transfer->actual_length);
-      UVC_EXIT_VOID();
-      return;
+  if (event != 0) {
+    UVC_DEBUG("Unhandled VC event %d", (int) event);
+    UVC_EXIT_VOID();
+    return;
+  }
+
+  /* printf("bSelector: %d\n", selector); */
+
+  DL_FOREACH(devh->info->ctrl_if.input_term_descs, input_terminal) {
+    if (input_terminal->bTerminalID == originator) {
+      status_class = UVC_STATUS_CLASS_CONTROL_CAMERA;
+      found_entity = 1;
+      break;
     }
+  }
 
-    event = transfer->buffer[2];
-    selector = transfer->buffer[3];
-
-    if (originator == 0) {
-      UVC_DEBUG("Unhandled update from VC interface");
-      UVC_EXIT_VOID();
-      return;  /* @todo VideoControl virtual entity interface updates */
-    }
-
-    if (event != 0) {
-      UVC_DEBUG("Unhandled VC event %d", (int) event);
-      UVC_EXIT_VOID();
-      return;
-    }
-
-    /* printf("bSelector: %d\n", selector); */
-
-    DL_FOREACH(devh->info->ctrl_if.input_term_descs, input_terminal) {
-      if (input_terminal->bTerminalID == originator) {
-        status_class = UVC_STATUS_CLASS_CONTROL_CAMERA;
+  if (!found_entity) {
+    DL_FOREACH(devh->info->ctrl_if.processing_unit_descs, processing_unit) {
+      if (processing_unit->bUnitID == originator) {
+        status_class = UVC_STATUS_CLASS_CONTROL_PROCESSING;
         found_entity = 1;
         break;
       }
     }
-
-    if (!found_entity) {
-      DL_FOREACH(devh->info->ctrl_if.processing_unit_descs, processing_unit) {
-        if (processing_unit->bUnitID == originator) {
-          status_class = UVC_STATUS_CLASS_CONTROL_PROCESSING;
-          found_entity = 1;
-          break;
-        }
-      }
-    }
-
-    if (!found_entity) {
-      UVC_DEBUG("Got status update for unknown VideoControl entity %d",
-		(int) originator);
-      UVC_EXIT_VOID();
-      return;
-    }
-
-    attribute = transfer->buffer[4];
-    data = transfer->buffer + 5;
-    data_len = transfer->actual_length - 5;
-    break;
   }
-  case 2:  /* VideoStreaming interface */
-    UVC_DEBUG("Unhandled update from VideoStreaming interface");
+
+  if (!found_entity) {
+    UVC_DEBUG("Got status update for unknown VideoControl entity %d",
+  (int) originator);
     UVC_EXIT_VOID();
-    return;  /* @todo VideoStreaming updates */
+    return;
   }
 
-  UVC_DEBUG("Event: class=%d, event=%d, selector=%d, attribute=%d, data_len=%zd",
-    status_class, event, selector, attribute, data_len);
+  attribute = data[4];
+  content = data + 5;
+  content_len = len - 5;
+
+  UVC_DEBUG("Event: class=%d, event=%d, selector=%d, attribute=%d, content_len=%zd",
+    status_class, event, selector, attribute, content_len);
 
   if(devh->status_cb) {
     UVC_DEBUG("Running user-supplied status callback");
@@ -1370,8 +1656,59 @@ void uvc_process_status_xfer(uvc_device_handle_t *devh, struct libusb_transfer *
                     event,
                     selector,
                     attribute,
-                    data, data_len,
+                    content, content_len,
                     devh->status_user_ptr);
+  }
+  
+  UVC_EXIT_VOID();
+}
+
+void uvc_process_streaming_status(uvc_device_handle_t *devh, unsigned char *data, int len) {
+  
+  UVC_ENTER();
+
+  if (len < 3) {
+    UVC_DEBUG("Invalid streaming status event received.\n");
+    UVC_EXIT_VOID();
+    return;
+  }
+
+  if (data[2] == 0) {
+    if (len < 4) {
+      UVC_DEBUG("Short read of status update (%d bytes)", len);
+      UVC_EXIT_VOID();
+      return;
+    }
+    UVC_DEBUG("Button (intf %u) %s len %d\n", data[1], data[3] ? "pressed" : "released", len);
+    
+    if(devh->button_cb) {
+      UVC_DEBUG("Running user-supplied button callback");
+      devh->button_cb(data[1],
+                      data[3],
+                      devh->button_user_ptr);
+    }
+  } else {
+    UVC_DEBUG("Stream %u error event %02x %02x len %d.\n", data[1], data[2], data[3], len);
+  }
+
+  UVC_EXIT_VOID();
+}
+
+void uvc_process_status_xfer(uvc_device_handle_t *devh, struct libusb_transfer *transfer) {
+  
+  UVC_ENTER();
+
+  /* printf("Got transfer of aLen = %d\n", transfer->actual_length); */
+
+  if (transfer->actual_length > 0) {
+    switch (transfer->buffer[0] & 0x0f) {
+    case 1: /* VideoControl interface */
+      uvc_process_control_status(devh, transfer->buffer, transfer->actual_length);
+      break;
+    case 2:  /* VideoStreaming interface */
+      uvc_process_streaming_status(devh, transfer->buffer, transfer->actual_length);
+      break;
+    }
   }
 
   UVC_EXIT_VOID();
@@ -1380,7 +1717,7 @@ void uvc_process_status_xfer(uvc_device_handle_t *devh, struct libusb_transfer *
 /** @internal
  * @brief Process asynchronous status updates from the device.
  */
-void _uvc_status_callback(struct libusb_transfer *transfer) {
+void LIBUSB_CALL _uvc_status_callback(struct libusb_transfer *transfer) {
   UVC_ENTER();
 
   uvc_device_handle_t *devh = (uvc_device_handle_t *) transfer->user_data;
@@ -1402,7 +1739,10 @@ void _uvc_status_callback(struct libusb_transfer *transfer) {
     break;
   }
 
-  uvc_error_t ret = libusb_submit_transfer(transfer);
+#ifdef UVC_DEBUGGING
+  uvc_error_t ret =
+#endif
+      libusb_submit_transfer(transfer);
   UVC_DEBUG("libusb_submit_transfer() = %d", ret);
 
   UVC_EXIT_VOID();
@@ -1422,3 +1762,30 @@ void uvc_set_status_callback(uvc_device_handle_t *devh,
 
   UVC_EXIT_VOID();
 }
+
+/** @brief Set a callback function to receive button events
+ *
+ * @ingroup device
+ */
+void uvc_set_button_callback(uvc_device_handle_t *devh,
+                             uvc_button_callback_t cb,
+                             void *user_ptr) {
+  UVC_ENTER();
+
+  devh->button_cb = cb;
+  devh->button_user_ptr = user_ptr;
+
+  UVC_EXIT_VOID();
+}
+
+/**
+ * @brief Get format descriptions for the open device.
+ *
+ * @note Do not modify the returned structure.
+ *
+ * @param devh Device handle to an open UVC device
+ */
+const uvc_format_desc_t *uvc_get_format_descs(uvc_device_handle_t *devh) {
+  return devh->info->stream_ifs->format_descs;
+}
+
