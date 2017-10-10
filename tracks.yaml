@@ -107,7 +107,7 @@ tracks:
     devel_branch: null
     last_version: 0.0.5
     name: upstream
-    patches: jade
+    patches: lunar
     release_inc: '3'
     release_repo_url: null
     release_tag: v:{version}
