@@ -1,3 +1,26 @@
+## libuvc (lunar) - 0.0.6-2
+
+The packages in the `libuvc` repository were released into the `lunar` distro by running `/usr/bin/bloom-release --track lunar --rosdistro lunar libuvc` on `Wed, 11 Oct 2017 00:41:44 -0000`
+
+The `libuvc` package was released.
+
+Version of package(s) in repository `libuvc`:
+
+- upstream repository: https://github.com/ktossell/libuvc.git
+- release repository: https://github.com/ktossell/libuvc-release.git
+- rosdistro version: `0.0.6-0`
+- old version: `0.0.6-1`
+- new version: `0.0.6-2`
+
+Versions of tools used:
+
+- bloom version: `0.5.26`
+- catkin_pkg version: `0.3.7`
+- rosdep version: `0.11.8`
+- rosdistro version: `0.6.2`
+- vcstools version: `0.1.39`
+
+
 ## libuvc (lunar) - 0.0.6-1
 
 The packages in the `libuvc` repository were released into the `lunar` distro by running `/usr/bin/bloom-release --track lunar --rosdistro lunar libuvc` on `Wed, 11 Oct 2017 00:38:51 -0000`
