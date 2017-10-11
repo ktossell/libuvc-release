@@ -10,6 +10,7 @@
 
   <run_depend>catkin</run_depend>
   <buildtool_depend>cmake</buildtool_depend>
+  <build_depend>pkg-config</build_depend>
   <build_depend>libusb-1.0-dev</build_depend>
   <build_depend>libjpeg</build_depend>
   <run_depend>libusb-1.0-dev</run_depend>
