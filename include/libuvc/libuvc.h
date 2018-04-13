@@ -6,8 +6,12 @@ extern "C" {
 #endif
 
 #include <stdio.h> // FILE
-#include <libusb-1.0/libusb.h>
+#include <stdint.h>
+#include <sys/time.h>
 #include <libuvc/libuvc_config.h>
+
+struct libusb_context;
+struct libusb_device_handle;
 
 /** UVC error types, based on libusb errors
  * @ingroup diag
@@ -68,7 +72,16 @@ enum uvc_frame_format {
   UVC_FRAME_FORMAT_BGR,
   /** Motion-JPEG (or JPEG) encoded images */
   UVC_FRAME_FORMAT_MJPEG,
+  /** Greyscale images */
   UVC_FRAME_FORMAT_GRAY8,
+  UVC_FRAME_FORMAT_GRAY16,
+  /* Raw colour mosaic images */
+  UVC_FRAME_FORMAT_BY8,
+  UVC_FRAME_FORMAT_BA81,
+  UVC_FRAME_FORMAT_SGRBG8,
+  UVC_FRAME_FORMAT_SGBRG8,
+  UVC_FRAME_FORMAT_SRGGB8,
+  UVC_FRAME_FORMAT_SBGGR8,
   /** Number of formats understood */
   UVC_FRAME_FORMAT_COUNT,
 };
@@ -84,6 +97,104 @@ enum uvc_frame_format {
 #define UVC_COLOR_FORMAT_BGR UVC_FRAME_FORMAT_BGR
 #define UVC_COLOR_FORMAT_MJPEG UVC_FRAME_FORMAT_MJPEG
 #define UVC_COLOR_FORMAT_GRAY8 UVC_FRAME_FORMAT_GRAY8
+#define UVC_COLOR_FORMAT_GRAY16 UVC_FRAME_FORMAT_GRAY16
+
+/** VideoStreaming interface descriptor subtype (A.6) */
+enum uvc_vs_desc_subtype {
+  UVC_VS_UNDEFINED = 0x00,
+  UVC_VS_INPUT_HEADER = 0x01,
+  UVC_VS_OUTPUT_HEADER = 0x02,
+  UVC_VS_STILL_IMAGE_FRAME = 0x03,
+  UVC_VS_FORMAT_UNCOMPRESSED = 0x04,
+  UVC_VS_FRAME_UNCOMPRESSED = 0x05,
+  UVC_VS_FORMAT_MJPEG = 0x06,
+  UVC_VS_FRAME_MJPEG = 0x07,
+  UVC_VS_FORMAT_MPEG2TS = 0x0a,
+  UVC_VS_FORMAT_DV = 0x0c,
+  UVC_VS_COLORFORMAT = 0x0d,
+  UVC_VS_FORMAT_FRAME_BASED = 0x10,
+  UVC_VS_FRAME_FRAME_BASED = 0x11,
+  UVC_VS_FORMAT_STREAM_BASED = 0x12
+};
+
+struct uvc_format_desc;
+struct uvc_frame_desc;
+
+/** Frame descriptor
+ *
+ * A "frame" is a configuration of a streaming format
+ * for a particular image size at one of possibly several
+ * available frame rates.
+ */
+typedef struct uvc_frame_desc {
+  struct uvc_format_desc *parent;
+  struct uvc_frame_desc *prev, *next;
+  /** Type of frame, such as JPEG frame or uncompressed frme */
+  enum uvc_vs_desc_subtype bDescriptorSubtype;
+  /** Index of the frame within the list of specs available for this format */
+  uint8_t bFrameIndex;
+  uint8_t bmCapabilities;
+  /** Image width */
+  uint16_t wWidth;
+  /** Image height */
+  uint16_t wHeight;
+  /** Bitrate of corresponding stream at minimal frame rate */
+  uint32_t dwMinBitRate;
+  /** Bitrate of corresponding stream at maximal frame rate */
+  uint32_t dwMaxBitRate;
+  /** Maximum number of bytes for a video frame */
+  uint32_t dwMaxVideoFrameBufferSize;
+  /** Default frame interval (in 100ns units) */
+  uint32_t dwDefaultFrameInterval;
+  /** Minimum frame interval for continuous mode (100ns units) */
+  uint32_t dwMinFrameInterval;
+  /** Maximum frame interval for continuous mode (100ns units) */
+  uint32_t dwMaxFrameInterval;
+  /** Granularity of frame interval range for continuous mode (100ns) */
+  uint32_t dwFrameIntervalStep;
+  /** Frame intervals */
+  uint8_t bFrameIntervalType;
+  /** number of bytes per line */
+  uint32_t dwBytesPerLine;
+  /** Available frame rates, zero-terminated (in 100ns units) */
+  uint32_t *intervals;
+} uvc_frame_desc_t;
+
+/** Format descriptor
+ *
+ * A "format" determines a stream's image type (e.g., raw YUYV or JPEG)
+ * and includes many "frame" configurations.
+ */
+typedef struct uvc_format_desc {
+  struct uvc_streaming_interface *parent;
+  struct uvc_format_desc *prev, *next;
+  /** Type of image stream, such as JPEG or uncompressed. */
+  enum uvc_vs_desc_subtype bDescriptorSubtype;
+  /** Identifier of this format within the VS interface's format list */
+  uint8_t bFormatIndex;
+  uint8_t bNumFrameDescriptors;
+  /** Format specifier */
+  union {
+    uint8_t guidFormat[16];
+    uint8_t fourccFormat[4];
+  };
+  /** Format-specific data */
+  union {
+    /** BPP for uncompressed stream */
+    uint8_t bBitsPerPixel;
+    /** Flags for JPEG stream */
+    uint8_t bmFlags;
+  };
+  /** Default {uvc_frame_desc} to choose given this format */
+  uint8_t bDefaultFrameIndex;
+  uint8_t bAspectRatioX;
+  uint8_t bAspectRatioY;
+  uint8_t bmInterlaceFlags;
+  uint8_t bCopyProtect;
+  uint8_t bVariableSize;
+  /** Available frame specifications for this format */
+  struct uvc_frame_desc *frame_descs;
+} uvc_format_desc_t;
 
 /** UVC request code (A.8) */
 enum uvc_req_code {
@@ -242,6 +353,13 @@ typedef struct uvc_processing_unit {
   uint64_t bmControls;
 } uvc_processing_unit_t;
 
+/** Represents selector unit to connect other units */
+typedef struct uvc_selector_unit {
+  struct uvc_selector_unit *prev, *next;
+  /** Index of the selector unit within the device */
+  uint8_t bUnitID;
+} uvc_selector_unit_t;
+
 /** Custom processing or camera-control functions */
 typedef struct uvc_extension_unit {
   struct uvc_extension_unit *prev, *next;
@@ -274,6 +392,13 @@ typedef void(uvc_status_callback_t)(enum uvc_status_class status_class,
                                     int selector,
                                     enum uvc_status_attribute status_attribute,
                                     void *data, size_t data_len,
+                                    void *user_ptr);
+
+/** A callback function to accept button events
+ * @ingroup device
+ */
+typedef void(uvc_button_callback_t)(int button,
+                                    int state,
                                     void *user_ptr);
 
 /** Structure representing a UVC device descriptor.
@@ -347,7 +472,11 @@ typedef struct uvc_stream_ctrl {
   uint16_t wDelay;
   uint32_t dwMaxVideoFrameSize;
   uint32_t dwMaxPayloadTransferSize;
-  /** @todo add UVC 1.1 parameters */
+  uint32_t dwClockFrequency;
+  uint8_t bmFramingInfo;
+  uint8_t bPreferredVersion;
+  uint8_t bMinVersion;
+  uint8_t bMaxVersion;
   uint8_t bInterfaceNumber;
 } uvc_stream_ctrl_t;
 
@@ -373,13 +502,18 @@ uvc_error_t uvc_find_device(
     uvc_device_t **dev,
     int vid, int pid, const char *sn);
 
+uvc_error_t uvc_find_devices(
+    uvc_context_t *ctx,
+    uvc_device_t ***devs,
+    int vid, int pid, const char *sn);
+
 uvc_error_t uvc_open(
     uvc_device_t *dev,
     uvc_device_handle_t **devh);
 void uvc_close(uvc_device_handle_t *devh);
 
 uvc_device_t *uvc_get_device(uvc_device_handle_t *devh);
-libusb_device_handle *uvc_get_libusb_handle(uvc_device_handle_t *devh);
+struct libusb_device_handle *uvc_get_libusb_handle(uvc_device_handle_t *devh);
 
 void uvc_ref_device(uvc_device_t *dev);
 void uvc_unref_device(uvc_device_t *dev);
@@ -388,8 +522,14 @@ void uvc_set_status_callback(uvc_device_handle_t *devh,
                              uvc_status_callback_t cb,
                              void *user_ptr);
 
+void uvc_set_button_callback(uvc_device_handle_t *devh,
+                             uvc_button_callback_t cb,
+                             void *user_ptr);
+
+const uvc_input_terminal_t *uvc_get_camera_terminal(uvc_device_handle_t *devh);
 const uvc_input_terminal_t *uvc_get_input_terminals(uvc_device_handle_t *devh);
 const uvc_output_terminal_t *uvc_get_output_terminals(uvc_device_handle_t *devh);
+const uvc_selector_unit_t *uvc_get_selector_units(uvc_device_handle_t *devh);
 const uvc_processing_unit_t *uvc_get_processing_units(uvc_device_handle_t *devh);
 const uvc_extension_unit_t *uvc_get_extension_units(uvc_device_handle_t *devh);
 
@@ -400,6 +540,8 @@ uvc_error_t uvc_get_stream_ctrl_format_size(
     int width, int height,
     int fps
     );
+
+const uvc_format_desc_t *uvc_get_format_descs(uvc_device_handle_t* );
 
 uvc_error_t uvc_probe_stream_ctrl(
     uvc_device_handle_t *devh,
@@ -583,6 +725,9 @@ uvc_error_t uvc_any2rgb(uvc_frame_t *in, uvc_frame_t *out);
 uvc_error_t uvc_yuyv2bgr(uvc_frame_t *in, uvc_frame_t *out);
 uvc_error_t uvc_uyvy2bgr(uvc_frame_t *in, uvc_frame_t *out);
 uvc_error_t uvc_any2bgr(uvc_frame_t *in, uvc_frame_t *out);
+
+uvc_error_t uvc_yuyv2y(uvc_frame_t *in, uvc_frame_t *out);
+uvc_error_t uvc_yuyv2uv(uvc_frame_t *in, uvc_frame_t *out);
 
 #ifdef LIBUVC_HAS_JPEG
 uvc_error_t uvc_mjpeg2rgb(uvc_frame_t *in, uvc_frame_t *out);
