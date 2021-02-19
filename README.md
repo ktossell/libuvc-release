@@ -1,3 +1,26 @@
+## libuvc (noetic) - 0.0.6-1
+
+The packages in the `libuvc` repository were released into the `noetic` distro by running `/usr/bin/bloom-release libuvc -r noetic` on `Fri, 19 Feb 2021 08:52:38 -0000`
+
+The `libuvc` package was released.
+
+Version of package(s) in repository `libuvc`:
+
+- upstream repository: https://github.com/ktossell/libuvc.git
+- release repository: unknown
+- rosdistro version: `null`
+- old version: `null`
+- new version: `0.0.6-1`
+
+Versions of tools used:
+
+- bloom version: `0.10.1`
+- catkin_pkg version: `0.4.23`
+- rosdep version: `0.19.0`
+- rosdistro version: `0.8.3`
+- vcstools version: `0.1.42`
+
+
 ## libuvc (melodic) - 0.0.6-0
 
 The packages in the `libuvc` repository were released into the `melodic` distro by running `/usr/bin/bloom-release libuvc --track melodic --rosdistro melodic` on `Fri, 20 Jul 2018 00:42:49 -0000`
